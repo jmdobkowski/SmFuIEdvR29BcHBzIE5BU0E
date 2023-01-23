@@ -1,68 +1,44 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
 	"time"
 
+	"github.com/jmdobkowski/SmFuIEdvR29BcHBzIE5BU0E/url-collector/config"
 	"github.com/jmdobkowski/SmFuIEdvR29BcHBzIE5BU0E/url-collector/internal"
-	"github.com/jmdobkowski/SmFuIEdvR29BcHBzIE5BU0E/url-collector/providers/nasa"
+	"github.com/jmdobkowski/SmFuIEdvR29BcHBzIE5BU0E/url-collector/internal/providers"
 )
 
 func main() {
-	http.HandleFunc("/pictures", pictures)
-	http.ListenAndServe(":4090", nil)
-}
+	cfg := config.LoadFromEnv()
 
-func pictures(w http.ResponseWriter, req *http.Request) {
-	fromParam := req.URL.Query().Get("from")
-	toParam := req.URL.Query().Get("to")
+	provider := providers.NewAPODProvider(cfg.ApiKey, cfg.ConcurrentRequests)
+	server := internal.Server{Provider: provider}
 
-	from, err := time.Parse("2006-01-02", fromParam)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "cannot parse parameter\"from\"")
-		return
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	hs := http.Server{
+		Addr:        ":" + strconv.Itoa(cfg.Port),
+		Handler:     server,
+		BaseContext: func(l net.Listener) context.Context { return ctx },
 	}
 
-	to, err := time.Parse("2006-01-02", toParam)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "cannot parse parameter\"to\"")
-		return
-	}
+	go func() {
+		<-ctx.Done()
+		log.Printf("shutting down server...")
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		hs.Shutdown(shutdownContext)
+	}()
 
-	urls, err := internal.Download(req.Context(), &nasa.APODProvider{}, from, to)
-	if err != nil {
-		log.Printf("could not fetch for (%v,%v): %v", from, to, err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
-	writeResponse(w, urls)
-}
-
-type response struct {
-	Urls []string `json:"urls"`
-}
-
-func writeResponse(w http.ResponseWriter, urls []string) {
-	w.Header().Add("content-type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	encoder.Encode(response{urls})
-}
-
-type errorResponse struct {
-	Message string `json:"message"`
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	w.Header().Add("content-type", "application/json")
-	w.WriteHeader(status)
-
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	encoder.Encode(errorResponse{message})
+	log.Printf("starting server on port %d...", cfg.Port)
+	log.Fatal(hs.ListenAndServe())
 }
